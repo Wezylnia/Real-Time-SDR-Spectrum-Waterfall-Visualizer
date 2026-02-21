@@ -32,6 +32,16 @@
 static float s_waterfall[WATERFALL_ROWS][FFT_SIZE];
 static float s_psd[FFT_SIZE];
 
+/*
+ * Async SDR callback'inden kaydediciye köprü.
+ * rtlsdr_read_async thread'inden çağrılır; her I/Q bloğunu recorder'a
+ * yollar. GUI thread'i bu yolda değildir — veri kaybı yaşanmaz.
+ */
+static void on_sdr_data(const uint8_t *buf, uint32_t len, void *ud) {
+    (void)len;
+    recorder_push((RecorderState *)ud, buf);
+}
+
 static void waterfall_push(const float *psd) {
     memmove(s_waterfall[0], s_waterfall[1],
             sizeof(float) * FFT_SIZE * (WATERFALL_ROWS - 1));
@@ -98,14 +108,24 @@ int main(int argc, char *argv[]) {
     ctx.db_min = panel.sl_dbmin.val;
     ctx.db_max = panel.sl_dbmax.val;
 
-    /* ── 7. Ham veri tamponu ───────────────────────────────── */
+    /* ── 7. Asenkron SDR okumayı başlat ───────────────────── */
+    /*
+     * sdr_start_async, rtlsdr_read_async'i ayrı bir thread'de başlatır.
+     * Bu thread GPU/VSYNC'e bağlı değildir; cihazın tam bant genişliğinde
+     * (2.048 MS/s → ~4 MB/s) kesintisiz veri akar.
+     *   - on_sdr_data callback'i: kaydedici aktifse her bloğu diske atar.
+     *   - GUI: sdr_pop_block() ile en güncel bloğu 60 FPS hızında okur.
+     */
+    sdr_start_async(&sdr, on_sdr_data, &rec);
+
+    /* ── 8. Ham veri tamponu (GUI görüntüleme için) ────────── */
     uint8_t *raw = (uint8_t *)malloc(FFT_SIZE * 2);
     if (!raw) {
         fprintf(stderr, "Bellek hatasi\n");
         return 1;
     }
 
-    /* ── 8. Ana döngü ──────────────────────────────────────── */
+    /* ── 9. Ana döngü ──────────────────────────────────────── */
     int running = 1;
     while (running) {
 
@@ -120,9 +140,15 @@ int main(int argc, char *argv[]) {
         }
         if (!running) break;
 
-        /* RTL-SDR'dan bir blok oku */
-        if (sdr_read_block(&sdr, raw) == 0) {
-            recorder_push(&rec, raw);
+        /*
+         * Async thread'den en güncel bloğu al.
+         * - Yeni blok varsa FFT hesapla ve şelaleyi güncelle.
+         * - Yoksa (GUI, async'ten daha hızlı döndüyse) mevcut s_psd ile
+         *   tekrar çiz; grafik donar değil, sadece güncellenmez.
+         * Kayıt (recorder_push) artık on_sdr_data callback'inde yapılıyor;
+         * veri kaybı yaşanmaz.
+         */
+        if (sdr_pop_block(&sdr, raw)) {
             fft_compute_psd(raw, s_psd);
             waterfall_push(s_psd);
         }
@@ -140,7 +166,13 @@ int main(int argc, char *argv[]) {
         render_present(&ctx);
     }
 
-    /* ── 9. Temizlik ───────────────────────────────────────── */
+    /* ── 10. Temizlik ──────────────────────────────────────── */
+    /*
+     * Önce async SDR thread durdurulur (rtlsdr_cancel_async),
+     * ardından recorder durdurulur — sıra önemli: SDR thread durmazsa
+     * recorder_push çağrılmaya devam edebilir.
+     */
+    sdr_stop_async(&sdr);
     if (rec.active) recorder_stop(&rec);
     free(raw);
     render_free(&ctx);
