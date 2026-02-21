@@ -11,6 +11,7 @@ The user interface is built with SDL2 and provides a control panel to adjust par
 *   **Waterfall Display:** Shows the history of the spectrum over time, allowing for the identification of transient signals.
 *   **Interactive Control Panel:** Allows for on-the-fly adjustments of SDR parameters.
 *   **IQ Data Recording:** Can record the raw I/Q data for later analysis.
+<img width="1919" height="986" alt="image" src="https://github.com/user-attachments/assets/0ec5c380-4b26-4fae-8185-7cb641ad385f" />
 
 ## Modules
 
